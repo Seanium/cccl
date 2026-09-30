@@ -729,6 +729,15 @@
       "inherits": "all-dev"
     },
     {
+      "name": "all-tidy",
+      "configurePreset": "all-tidy",
+      "filter": {
+        "include": {
+          "name": "^cccl\\.test\\.tidy.*$"
+        }
+      }
+    },
+    {
       "name": "libcudacxx-codegen",
       "configurePreset": "libcudacxx-codegen",
       "inherits": "base",
