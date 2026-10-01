@@ -104,6 +104,8 @@ def _numba_semantic_token(value):
     nested values with compiler-specific normalization. Numba types contribute
     their concrete class and equality key. Nested device dispatchers retain
     their function, compile options, locals, and any fixed signatures.
+    Captured NumPy scalars retain their dtype and exact bytes; arrays retain
+    their dtype, shape, strides, writeability, and a digest of every element.
 
     Parameters
     ----------
@@ -119,7 +121,8 @@ def _numba_semantic_token(value):
     Raises
     ------
     TypeError
-        The common encoder encounters an unsupported callable value.
+        A NumPy scalar or array has an object-containing dtype, or the common
+        encoder encounters an unsupported callable value.
     """
 
     value = _normalize_numba_callable(value)
