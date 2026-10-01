@@ -208,7 +208,7 @@ public:
   {
     llvm::SmallVector<StringRef> entries;
 
-    traits_option_.split(entries, /*Separator = */ ';', /*MaxSplit=*/-1, /*KeepEmpty=*/false);
+    traits_option_.split(entries, /*Separator=*/';', /*MaxSplit=*/-1, /*KeepEmpty=*/false);
     replacements_.reserve(entries.size() * 3);
     for (auto&& entry : entries)
     {
