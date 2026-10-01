@@ -54,12 +54,12 @@ void qualified_names()
   // CHECK-FIXES-LABEL: - DiagnosticName: cccl-prefer-cuda-traits
   // CHECK-FIXES: Length: 17
   // CHECK-FIXES-NEXT: ReplacementText: {{'?}}::foo::replacement_baz_v{{'?}}{{$}}
-  using qualified_alias = foo::bar::baz_t<T>;
+  using qualified_alias [[maybe_unused]] = foo::bar::baz_t<T>;
   // CHECK-MESSAGES: :[[@LINE-1]]:{{[0-9]+}}: warning: use 'foo::replacement_baz_t' instead of 'T' for generic types [cccl-prefer-cuda-traits]
   // CHECK-FIXES-LABEL: - DiagnosticName: cccl-prefer-cuda-traits
   // CHECK-FIXES: Length: 15
   // CHECK-FIXES-NEXT: ReplacementText: {{'?}}foo::replacement_baz_t{{'?}}{{$}}
-  using global_alias = ::foo::bar::baz_t<T>;
+  using global_alias [[maybe_unused]] = ::foo::bar::baz_t<T>;
   // CHECK-MESSAGES: :[[@LINE-1]]:{{[0-9]+}}: warning: use '::foo::replacement_baz_t' instead of 'T' for generic types [cccl-prefer-cuda-traits]
   // CHECK-FIXES-LABEL: - DiagnosticName: cccl-prefer-cuda-traits
   // CHECK-FIXES: Length: 17
@@ -81,7 +81,7 @@ void relative_names()
   // CHECK-FIXES-LABEL: - DiagnosticName: cccl-prefer-cuda-traits
   // CHECK-FIXES: Length: 10
   // CHECK-FIXES-NEXT: ReplacementText: {{'?}}replacement_baz_v{{'?}}{{$}}
-  using relative_alias = bar::baz_t<T>;
+  using relative_alias [[maybe_unused]] = bar::baz_t<T>;
   // CHECK-MESSAGES: :[[@LINE-1]]:{{[0-9]+}}: warning: use 'replacement_baz_t' instead of 'T' for generic types [cccl-prefer-cuda-traits]
   // CHECK-FIXES-LABEL: - DiagnosticName: cccl-prefer-cuda-traits
   // CHECK-FIXES: Length: 10

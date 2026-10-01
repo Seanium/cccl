@@ -43,7 +43,7 @@ void enclosing_namespace()
   // CHECK-FIXES-LABEL: - DiagnosticName: cccl-prefer-cuda-traits
   // CHECK-FIXES: Length: 5
   // CHECK-FIXES-NEXT: ReplacementText: {{'?}}std::foo_v{{'?}}{{$}}
-  using type = foo_t<T>;
+  using type [[maybe_unused]] = foo_t<T>;
   // CHECK-MESSAGES: :[[@LINE-1]]:{{[0-9]+}}: warning: use 'std::foo_t' instead of 'T' for generic types [cccl-prefer-cuda-traits]
   // CHECK-FIXES-LABEL: - DiagnosticName: cccl-prefer-cuda-traits
   // CHECK-FIXES: Length: 5
@@ -88,7 +88,7 @@ void using_declarations()
   // CHECK-FIXES-LABEL: - DiagnosticName: cccl-prefer-cuda-traits
   // CHECK-FIXES: Length: 5
   // CHECK-FIXES-NEXT: ReplacementText: {{'?}}cuda::std::foo_v{{'?}}{{$}}
-  using type = foo_t<T>;
+  using type [[maybe_unused]] = foo_t<T>;
   // CHECK-MESSAGES: :[[@LINE-1]]:{{[0-9]+}}: warning: use 'cuda::std::foo_t' instead of 'T' for generic types [cccl-prefer-cuda-traits]
   // CHECK-FIXES-LABEL: - DiagnosticName: cccl-prefer-cuda-traits
   // CHECK-FIXES: Length: 5
