@@ -2,6 +2,7 @@
 // reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <utility>
@@ -25,6 +26,17 @@ using namespace ast_matchers; // NOLINT(google-build-using-namespace)
 AST_MATCHER(Type, isDependentType) // NOLINT
 {
   return Node.isDependentType();
+}
+
+// Clang 22's hasAnyTemplateArgumentLoc does not support UnresolvedLookupExpr.
+AST_MATCHER(UnresolvedLookupExpr, hasDependentTypeArgument) // NOLINT
+{
+  auto&& arguments = Node.template_arguments();
+
+  return std::any_of(arguments.begin(), arguments.end(), [](const auto& argument_loc) {
+    const auto& argument = argument_loc.getArgument();
+    return argument.getKind() == TemplateArgument::Type && argument.getAsType()->isDependentType();
+  });
 }
 
 class PreferCUDATraitsCheck final : public ClangTidyCheck
@@ -301,7 +313,7 @@ public:
           // Matches "is_trivially_copyable_v<T>", but not the using declaration. Follow using
           // declarations to the original trait declaration.
           unresolvedLookupExpr(
-            hasAnyDeclaration(namedDecl(hasUnderlyingDecl(declaration))), generic_argument, use_context)
+            hasAnyDeclaration(namedDecl(hasUnderlyingDecl(declaration))), hasDependentTypeArgument(), use_context)
             .bind(USE_BIND)),
         &replacement);
     }
