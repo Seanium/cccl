@@ -731,6 +731,7 @@
     {
       "name": "all-tidy",
       "configurePreset": "all-tidy",
+      "inherits": "base",
       "filter": {
         "include": {
           "name": "^cccl\\.test\\.tidy.*$"
