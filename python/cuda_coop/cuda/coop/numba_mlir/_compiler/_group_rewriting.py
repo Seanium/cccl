@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class GroupRewriteContext:
-    """Stable cross-family view of one before-inference rewrite.
+    """Stable cross-family view of one cooperative-call rewrite.
 
     Parameters
     ----------

@@ -47,7 +47,6 @@ from ._scalar_provenance import (
     scalar_expression_dtype,
 )
 
-
 if TYPE_CHECKING:
     from ._group_planner import _GroupCallPlanner
 
@@ -547,6 +546,7 @@ class GroupPlanningContext:
                         continue
                 if not isinstance(index, Integral) or isinstance(index, bool):
                     continue
+                index = int(index)
                 next_seen = {*seen, current.name}
                 for packed in payload_definitions(definition.value, next_seen):
                     if (
