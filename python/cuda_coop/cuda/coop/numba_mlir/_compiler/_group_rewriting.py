@@ -13,7 +13,13 @@ if TYPE_CHECKING:
 
 
 class GroupRewriteContext:
-    """Stable cross-family view of one before-inference rewrite."""
+    """Stable cross-family view of one before-inference rewrite.
+
+    Parameters
+    ----------
+    rewrite : CoopSinglePhaseRewrite
+        Active rewrite supplying the IR facts used by primitive-family hooks.
+    """
 
     __slots__ = ("__rewrite",)
 

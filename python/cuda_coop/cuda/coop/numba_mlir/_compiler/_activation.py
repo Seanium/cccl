@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import importlib
 from threading import RLock
-from typing import Any
+from types import ModuleType
 
 from ._numba_mlir_compat import (
-    _NumbaMlirBackendImportError,
+    NumbaMlirBackendImportError,
     _require_numba_mlir_version,
     _runtime_requirement,
 )
@@ -21,7 +21,40 @@ _BACKEND_PACKAGE = __package__.removesuffix("._compiler")
 _activation_lock = RLock()
 
 
-def _load_runtime() -> tuple[Any, _NumbaMlirBackendImportError | None]:
+def _load_runtime() -> tuple[
+    ModuleType | None, NumbaMlirBackendImportError | None
+]:
+    """Load the Numba CUDA compiler and classify activation failures.
+
+    Import ``numba_cuda_mlir``, validate its version, then import
+    ``numba_cuda_mlir.cuda``. Classify import failures to distinguish
+    a missing runtime, a package that lacks the required ``.cuda`` compiler
+    submodule, and a dependency that fails while either module is imported.
+    This checks the Python compiler installation; it does not check GPU
+    availability, driver support, or the installed CUDA Toolkit.
+
+    Return import failures with their original exception as the cause for
+    ``_require_runtime`` to raise. Version-validation failures raise directly,
+    before importing the ``.cuda`` submodule. In either case, explicit
+    registration and qualified imports propagate an ``ImportError``;
+    automatic registration catches it and warns, keeping the common import
+    usable.
+
+    Returns
+    -------
+    runtime : module or None
+        The ``numba_cuda_mlir.cuda`` module on success, otherwise ``None``.
+    error : NumbaMlirBackendImportError or None
+        Failure with a reason code and import details, otherwise ``None``.
+        Exactly one of the two return values is non-``None``.
+
+    Raises
+    ------
+    NumbaMlirBackendImportError
+        The runtime version cannot be established, falls outside the supported
+        range, or the version checker's ``packaging`` dependency is missing.
+    """
+
     try:
         runtime = importlib.import_module("numba_cuda_mlir")
     except ImportError as exc:
@@ -29,7 +62,7 @@ def _load_runtime() -> tuple[Any, _NumbaMlirBackendImportError | None]:
         if missing == "numba_cuda_mlir":
             return (
                 None,
-                _NumbaMlirBackendImportError(
+                NumbaMlirBackendImportError(
                     "backend-runtime-missing",
                     "cuda.coop.numba_mlir requires a compatible "
                     f"Numba-CUDA-MLIR runtime. {_runtime_requirement()}",
@@ -39,7 +72,7 @@ def _load_runtime() -> tuple[Any, _NumbaMlirBackendImportError | None]:
             )
         return (
             None,
-            _NumbaMlirBackendImportError(
+            NumbaMlirBackendImportError(
                 "transitive-runtime-import-failed",
                 "cuda.coop.numba_mlir found the Numba-CUDA-MLIR runtime, but "
                 f"importing it failed at dependency {missing!r}. "
@@ -51,7 +84,7 @@ def _load_runtime() -> tuple[Any, _NumbaMlirBackendImportError | None]:
     except Exception as exc:  # noqa: BLE001 - preserve backend import context
         return (
             None,
-            _NumbaMlirBackendImportError(
+            NumbaMlirBackendImportError(
                 "transitive-runtime-import-failed",
                 "cuda.coop.numba_mlir found the Numba-CUDA-MLIR runtime, but "
                 "importing it failed with "
@@ -70,7 +103,7 @@ def _load_runtime() -> tuple[Any, _NumbaMlirBackendImportError | None]:
         if missing == "numba_cuda_mlir.cuda":
             return (
                 None,
-                _NumbaMlirBackendImportError(
+                NumbaMlirBackendImportError(
                     "conflicting-backend-runtime",
                     "cuda.coop.numba_mlir found a package named "
                     "'numba_cuda_mlir', but it does not provide the CUDA "
@@ -82,7 +115,7 @@ def _load_runtime() -> tuple[Any, _NumbaMlirBackendImportError | None]:
             )
         return (
             None,
-            _NumbaMlirBackendImportError(
+            NumbaMlirBackendImportError(
                 "transitive-runtime-import-failed",
                 "cuda.coop.numba_mlir found the Numba-CUDA-MLIR runtime, but "
                 f"its CUDA compiler failed to import dependency {missing!r}. "
@@ -94,7 +127,7 @@ def _load_runtime() -> tuple[Any, _NumbaMlirBackendImportError | None]:
     except Exception as exc:  # noqa: BLE001 - preserve backend import context
         return (
             None,
-            _NumbaMlirBackendImportError(
+            NumbaMlirBackendImportError(
                 "transitive-runtime-import-failed",
                 "cuda.coop.numba_mlir found the Numba-CUDA-MLIR runtime, but "
                 "its CUDA compiler failed to import with "
@@ -110,6 +143,24 @@ _cuda_module = None
 
 
 def _require_runtime():
+    """Return the validated CUDA compiler module, loading it on first use.
+
+    Cache successful loads only. Explicit activation propagates the classified
+    import or version error; automatic registration catches it and emits its
+    incompatibility warning.
+
+    Returns
+    -------
+    ModuleType
+        The ``numba_cuda_mlir.cuda`` module.
+
+    Raises
+    ------
+    NumbaMlirBackendImportError
+        The runtime is absent, unsupported, or fails to import. The diagnostic
+        retains the reason and original exception established by the loader.
+    """
+
     global _cuda_module
     if _cuda_module is None:
         runtime, error = _load_runtime()
@@ -122,10 +173,21 @@ def _require_runtime():
 def _initialize_runtime_hooks() -> None:
     """Register the planner after all compiler support has loaded.
 
-    Implementation modules do not register compiler hooks during import.
-    A failed import can therefore be retried without undoing registrations
-    or removing successfully imported modules. The runtime deduplicates
-    repeated registration of the same planner class.
+    Serialize this backend's activation attempts and require a supported
+    runtime before importing its implementation. Those imports do not register
+    planner or rewrite hooks. Registering the single planner as the final step
+    therefore keeps failed imports from leaving partially activated cooperative
+    hooks; a later attempt can reuse successfully loaded modules. The runtime
+    deduplicates repeated registration of the same planner class.
+
+    Raises
+    ------
+    NumbaMlirBackendImportError
+        The runtime cannot be loaded or its version is unsupported.
+    ImportError
+        A compiler integration dependency cannot be imported. The original
+        import error propagates; automatic registration converts it to a
+        warning, while explicit activation leaves it visible to the caller.
     """
 
     with _activation_lock:

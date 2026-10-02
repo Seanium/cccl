@@ -4,7 +4,25 @@
 
 """Cache results on disk by function identity and serialized arguments.
 
-Set ``CUDA_COOP_ENABLE_CACHE=1`` before import to enable caching.
+``CUDA_COOP_ENABLE_CACHE`` enables persistent caching when set to ``"1"`` or
+any value other than empty, ``"0"``, ``"false"``, ``"no"``, or ``"off"``.
+Comparison ignores surrounding whitespace and letter case. Unset disables the
+disk cache. This flag does not control the separate in-memory LRU cache on
+NVRTC compilation.
+
+``XDG_CACHE_HOME`` selects the cache parent directory on non-Windows systems;
+the default is ``~/.cache``. ``LOCALAPPDATA`` selects it on Windows; the
+default is ``~/AppData/Local``. Only the variable for the current platform is
+read. Its value must be an absolute path: unset, empty, and relative values
+use the platform default. Cache files live under a ``cccl`` subdirectory,
+partitioned further by callable identity.
+
+The enable flag and selected cache location are captured when this module is
+imported. Set them before backend initialization imports this module; later
+environment changes do not reconfigure its wrappers. Directory or write
+``OSError`` failures disable disk caching for the rest of the process, while
+unreadable entries simply miss. Compilation proceeds without persistent
+caching in those cases.
 """
 
 import hashlib
@@ -41,6 +59,34 @@ _CACHE_LOCATION = _cache_location()
 
 
 def _json_cache_key(value):
+    """Convert supported key values into a tagged JSON-serializable tree.
+
+    Plain JSON loses distinctions such as tuples versus lists and cannot
+    encode bytes. Tag these containers, preserve a tuple subclass's qualified
+    type name, and encode bytes as base64. Represent dictionaries as sorted
+    key/value pairs so supported non-string keys can participate without JSON
+    coercing them to strings. Scalar values retain JSON's native encoding.
+
+    Parameters
+    ----------
+    value : object
+        A scalar (``None``, bool, int, float, or str), bytes, or a recursively
+        supported tuple, list, or dictionary. Dictionary entries are ordered
+        by ``repr`` of their keys. Recursive containers are not supported.
+
+    Returns
+    -------
+    object
+        JSON-compatible representation used to hash arguments. This is a key
+        encoding, not a general-purpose serialization format for cache values.
+
+    Raises
+    ------
+    TypeError
+        A value has no supported key representation. The disk-cache wrapper
+        treats this as a request to compute without caching.
+    """
+
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     if isinstance(value, bytes):
@@ -73,6 +119,31 @@ def _json_cache_key(value):
 
 
 def json_hash(*args, **kwargs):
+    """Hash positional and keyword arguments using the current cache schema.
+
+    Prefix the serialized argument tree with the schema version so changes to
+    the cache format invalidate older entries. Keyword names are part of the
+    key, and their insertion order does not affect it. This function does not
+    add callable identity; ``disk_cache`` passes that identity as an argument.
+
+    Parameters
+    ----------
+    *args : object
+        Positional key components accepted by ``_json_cache_key``.
+    **kwargs : object
+        Named key components with the same serialization restrictions.
+
+    Returns
+    -------
+    str
+        Hexadecimal SHA-256 digest of the versioned argument representation.
+
+    Raises
+    ------
+    TypeError
+        An argument cannot be represented by the cache key encoder.
+    """
+
     hasher = hashlib.sha256()
     hasher.update(f"v{_CACHE_SCHEMA_VERSION}:".encode())
     payload = json.dumps(
@@ -116,6 +187,26 @@ def _decode_cache_value(value):
 
 
 def _read_cache(path):
+    """Read one cache entry, treating unusable files as cache misses.
+
+    Validate the schema version and the decoded value's recorded type before
+    returning it. This catches stale formats and values whose JSON round trip
+    changes their top-level type. It does not authenticate cached data or
+    validate the value against a particular compiler invocation.
+
+    Parameters
+    ----------
+    path : str or path-like
+        JSON cache entry to open. The function does not modify or remove it.
+
+    Returns
+    -------
+    object
+        Decoded value on success, otherwise the unique ``_CACHE_MISS`` sentinel
+        for an unreadable, malformed, stale, or type-inconsistent entry.
+        ``None`` is a valid cached result and is distinct from a miss.
+    """
+
     try:
         with open(path, encoding="utf-8") as f:
             cached = json.load(f)
@@ -132,6 +223,31 @@ def _read_cache(path):
 
 
 def _write_cache(path, value):
+    """Serialize a result and atomically replace its cache entry.
+
+    Write a schema and top-level type tag alongside the value, encoding bytes
+    as base64. Use a temporary file in the destination directory, flush and
+    fsync it, then replace the destination so readers do not see a partially
+    written JSON document. Concurrent writers may replace the same entry.
+    On a write or replacement failure, attempt to remove the temporary file
+    and propagate the error for ``disk_cache`` to handle.
+
+    Parameters
+    ----------
+    path : str or path-like
+        Destination entry. Its parent directory must already exist.
+    value : object
+        Result to persist: bytes or a JSON-serializable value. A later read
+        also requires the decoded top-level type to match the saved type tag.
+
+    Raises
+    ------
+    OSError
+        Creating, writing, syncing, or replacing the entry fails.
+    TypeError or ValueError
+        The result cannot be serialized as a cache entry.
+    """
+
     cached = {
         "version": _CACHE_SCHEMA_VERSION,
         "value_type": _cache_value_type(value),
@@ -157,6 +273,36 @@ def _write_cache(path, value):
 
 
 def disk_cache(func):
+    """Decorate a computation with best-effort persistent result caching.
+
+    Cache files are namespaced by the callable's module and qualified name;
+    the entry key includes that identity, arguments, and the cache schema.
+    Callers must therefore include every compilation input that affects the
+    result in the arguments. Callable source changes do not invalidate entries
+    by themselves. The enable flag is read from ``CUDA_COOP_ENABLE_CACHE``
+    when this module is imported.
+
+    Unsupported key encodings bypass the cache, and unsupported result
+    encodings skip the write. Directory or write ``OSError`` failures disable
+    caching for every wrapper in this module for the rest of the process;
+    unreadable entries simply miss. Exceptions from the wrapped computation
+    propagate without being cached. There is no lock around computation, so
+    concurrent misses can compute the same result before atomic publication.
+
+    Parameters
+    ----------
+    func : callable
+        Computation whose result can be reused for the same serialized inputs.
+        Arguments must be accepted by ``_json_cache_key`` to use the cache;
+        results must round-trip through the cache value encoding.
+
+    Returns
+    -------
+    callable
+        Wrapper preserving ``func`` metadata and forwarding its arguments.
+        Returns a decoded cache hit or the newly computed result.
+    """
+
     cache_identity = f"{func.__module__}.{func.__qualname__}"
 
     @wraps(func)

@@ -147,7 +147,36 @@ class _GroupCallPlanner:
         return obj
 
     def _reject_literal_unroll_value(self, value: Any, parameter: str) -> None:
-        """Diagnose unrolled values used before the unrolling pass runs."""
+        """Reject compile-time controls that depend on a pending literal unroll.
+
+        Group planning needs shapes and selectors before the literal-unroll pass
+        has expanded its iterations. Trace all reaching definitions and
+        expression operands for a recognized ``literal_unroll`` call instead of
+        trying to resolve an iteration value prematurely. Unrelated
+        literal-unroll loops are allowed. Cycles terminate the search without
+        establishing a dependency.
+
+        Parameters
+        ----------
+        value : ir.Var or object
+            Argument whose IR dependencies are inspected. Non-variables have no
+            dependencies to inspect.
+        parameter : str
+            Description of the shape, selector, or other compile-time control
+            used in the diagnostic.
+
+        Returns
+        -------
+        None
+            The value has no detected dependency on a recognized unroll call.
+
+        Raises
+        ------
+        GroupRewriteError
+            A dependency reaches the standard or vendored Numba literal-unroll
+            marker; use constant controls or an ordinary loop with a fixed
+            cooperative shape.
+        """
 
         def depends_on_unroll(current, seen):
             if not isinstance(current, ir.Var) or current.name in seen:
@@ -207,6 +236,38 @@ class _GroupCallPlanner:
                     )
 
     def _constant(self, value: Any) -> Any:
+        """Resolve a required compile-time argument or request specialization.
+
+        Try direct argument and constant definitions first, then reconstruct
+        hierarchy or group descriptors, and finally use Numba constant
+        inference. A non-literal kernel argument requests dispatcher
+        specialization rather than being treated as an unsupported value.
+        Descriptor reconstruction may populate the planner's caches. This is the
+        required-constant path; callers classifying optional runtime controls
+        use ``_try_static_scalar`` instead.
+
+        Parameters
+        ----------
+        value : ir.Var or object
+            IR variable to resolve, or an already-resolved value returned
+            unchanged.
+
+        Returns
+        -------
+        object
+            Compile-time value, including ``None`` or a reconstructed
+            descriptor.
+
+        Raises
+        ------
+        ForceLiteralArg
+            A function argument must be recompiled with a literal type.
+        NonConstantGroupArgumentError
+            The value cannot be resolved by descriptor or constant inference.
+        GroupRewriteError
+            A recognized descriptor has unsupported call syntax or arguments.
+        """
+
         if not isinstance(value, ir.Var):
             return value
         definition = self._definition(value)
@@ -341,6 +402,41 @@ class _GroupCallPlanner:
         return hierarchy
 
     def _group(self, value: Any) -> ThreadGroup | None:
+        """Reconstruct a group descriptor from a supported IR definition.
+
+        Follow aliases and casts, accept existing host descriptors, and
+        interpret registered constructors and ``group_by`` calls on recognized
+        parents. Constructor identity matters; matching a callable's name is
+        insufficient. Arguments are resolved through ``_constant``, which may
+        request literal specialization. Common-API constructors retain
+        ``common_root`` provenance so later validation applies the portable
+        contract.
+
+        Cache newly constructed descriptors by variable name for this planner.
+        This describes the requested group; launch-dependent resolution belongs
+        to ``_resolve_group``. Unlike marker detection, this routine requires a
+        single resolvable definition and does not merge phi inputs.
+
+        Parameters
+        ----------
+        value : ThreadGroup, ir.Var, or object
+            Existing descriptor or variable expected to name one.
+
+        Returns
+        -------
+        ThreadGroup or None
+            Reconstructed or cached descriptor, or ``None`` if the definition is
+            not a recognized group expression.
+
+        Raises
+        ------
+        ForceLiteralArg
+            A constructor or subgroup argument needs literal specialization.
+        GroupRewriteError
+            A recognized constructor or subgroup call cannot be bound or its
+            arguments cannot be resolved as required compile-time values.
+        """
+
         if isinstance(value, ThreadGroup):
             return value
         if not isinstance(value, ir.Var):
@@ -539,6 +635,37 @@ class _GroupCallPlanner:
         seen: set[str] | None = None,
         thread_data_only: bool = False,
     ) -> bool | None:
+        """Classify a value by its per-thread payload constructor provenance.
+
+        Trace aliases, casts, phi inputs, and constant tuple projections to
+        ``ThreadData`` or qualified local-array constructors. The three-state
+        result lets a loop backedge coexist with a known constructor: a cycle
+        alone is unresolved, a constructor plus cycles is accepted, and any
+        concrete unrecognized path rejects the value. This classifies the
+        payload form only; dtype and extent are inferred separately.
+
+        Parameters
+        ----------
+        value : ir.Var or object
+            Variable to classify. Non-variables are not recognized payloads.
+        seen : set of str, optional
+            Recursion-path variable names and tuple-projection keys. The current
+            name is added in place; branches receive separate copies.
+        thread_data_only : bool, optional
+            If true, accept only common or qualified ``ThreadData``
+            constructors. Otherwise, also accept the recognized CUDA local-array
+            constructor.
+
+        Returns
+        -------
+        bool or None
+            ``True`` if at least one constructor is found and no path is
+            rejected; ``False`` for an unsupported definition, missing
+            definitions, or a non-variable; ``None`` when only cyclic paths
+            remain. The operand validation wrappers turn that last state into a
+            provenance diagnostic.
+        """
+
         if not isinstance(value, ir.Var):
             return False
         if seen is None:
@@ -699,6 +826,38 @@ class _GroupCallPlanner:
     def _array_extent(
         self, value: Any, *, seen: set[str] | None = None
     ) -> int | None:
+        """Recover one known per-thread item count from payload definitions.
+
+        Follow aliases, casts, phi inputs, and constant tuple projections to
+        ``ThreadData`` item counts or scalar local-array shapes. Gather known
+        extents and require them to agree, ignoring unresolved paths and
+        recursion backedges. Payload-kind validation is separate: a returned
+        extent alone is not proof that every reaching definition is a valid
+        payload. Required constructor dimensions may request literal argument
+        specialization.
+
+        Parameters
+        ----------
+        value : ir.Var or object
+            Payload variable to inspect. Non-variables have no inferred extent.
+        seen : set of str, optional
+            Recursion-path names and tuple-projection keys. The current name is
+            added in place; each reaching definition receives a separate copy.
+
+        Returns
+        -------
+        int or None
+            The unique known integral extent, excluding booleans, or ``None`` if
+            none can be recovered. Positivity is validated elsewhere.
+
+        Raises
+        ------
+        GroupRewriteError
+            Known extents disagree, or a dimension depends on literal unrolling.
+        ForceLiteralArg
+            A constructor dimension needs literal argument specialization.
+        """
+
         if not isinstance(value, ir.Var):
             return None
         if seen is None:
@@ -954,6 +1113,39 @@ class _GroupCallPlanner:
                 raise EscapingGroupDescriptorError(names)
 
     def run(self) -> bool:
+        """Plan public group operations and replace their descriptors in the IR.
+
+        First reject unsupported literal-unroll dependencies, identify
+        descriptor assignments, and ask each registered operation family to
+        build replacement statements. Before replacing block bodies, reject
+        runtime uses of the descriptors marked for removal.
+
+        Accepted descriptor assignments and obsolete callable assignments become
+        ``None`` assignments, preserving their targets; public operations become
+        private provider calls carrying their lowering plans. This removes the
+        group markers that hold back the later provider-rewrite phase. Planning
+        updates this instance's caches, dtype facts, and replacement
+        bookkeeping; block bodies are changed only after all calls and
+        descriptor uses pass.
+
+        Returns
+        -------
+        bool
+            ``True`` when block bodies were rewritten, including descriptor-only
+            cleanup. ``False`` when no descriptor, call, or callable needs
+            replacing.
+
+        Raises
+        ------
+        GroupRewriteError
+            A group call is invalid or a descriptor escapes its compile-time
+            uses.
+        ForceLiteralArg
+            Planning requires specialization of a function argument.
+        NotImplementedError
+            The requested group or operation has no supported lowering.
+        """
+
         self._reject_literal_unroll_constructors()
         self._mark_descriptor_calls()
         for block in self.func_ir.blocks.values():
@@ -1009,16 +1201,26 @@ def has_group_markers(func_ir) -> bool:
     here after inlining; this scan does not visit their bodies. ``ThreadData``
     and ``TempStorage`` constructors alone do not count as group markers.
 
-    This check controls the handoff between group planning and provider
-    rewriting. The planner uses a positive result to request
-    launch metadata and resolve the group calls. ``CoopSinglePhaseRewrite``
-    waits while the result is true. Successful group planning removes group
-    descriptors and replaces public operations with private provider calls,
-    which do not count as group markers. The result then becomes false even
-    though cooperative work remains, allowing provider rewriting to proceed.
+    The single whole-function planner uses a positive result in its group
+    resolution phase to request launch metadata and resolve the calls.
+    Successful resolution removes group descriptors and replaces public
+    operations with private provider calls, which do not count as group
+    markers. The following ``CoopSinglePhaseRewrite`` helper also checks for
+    unresolved markers before materializing those provider calls.
 
     Detection does not validate the calls or resolve their launch dimensions;
     those checks belong to the group planner.
+
+    Parameters
+    ----------
+    func_ir : ir.FunctionIR
+        Current function IR with its reaching-definition lookup available.
+        Scanned without modifying its blocks or resolving launch metadata.
+
+    Returns
+    -------
+    bool
+        Whether at least one recognized group-planning marker remains.
     """
     analyzer = object.__new__(_GroupCallPlanner)
     analyzer.func_ir = func_ir

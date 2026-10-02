@@ -46,7 +46,14 @@ class CoopSinglePhaseRewriteError(Exception):
 
 
 class _DeferredCoopRewrite(Exception):
-    """Leave launch-dependent cooperative IR for whole-function planning."""
+    """Signal that a compiler pass must leave a cooperative call for later.
+
+    ``CoopSinglePhaseRewrite.match`` catches this when launch-dependent work
+    needs exact launch metadata and records the deferral on the rewrite.
+    ``_CallRewriting._rewrite_calls`` reads that flag and retries kernel work
+    with the metadata. Deferral leaves the affected IR unchanged; it is not an
+    application error.
+    """
 
 
 def _next_global_name(stem: str) -> str:

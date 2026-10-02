@@ -82,7 +82,40 @@ def _load_store_value_abis(
     block_dim=None,
     threads_in_warp=None,
 ):
-    """Declare family-owned runtime scalar ABIs for one specialization."""
+    """Describe runtime controls whose ABI differs from ordinary core scalars.
+
+    A runtime valid-item count enters through a signed 64-bit value so bounds
+    can be checked before narrowing to CUB's signed 32-bit count. Its inclusive
+    limit is the exact group tile size. A runtime Load default instead uses
+    ``ExactValue`` so typing requires the payload dtype without an implicit
+    conversion. Omitted and static controls need no runtime ABI override.
+
+    Parameters
+    ----------
+    dtype : numba_types.Type
+        Normalized payload dtype, also required for a runtime default.
+    items_per_thread : int
+        Positive specialized payload extent per participating thread.
+    valid_items : ArgumentBinding
+        Binding kind for the optional valid-item count.
+    oob_default : ArgumentBinding or None, optional
+        Load default binding; ``None`` supplies no override.
+    block_dim : iterable of int, optional
+        Block dimensions used to compute a block tile's capacity.
+    threads_in_warp : int, optional
+        Logical warp width used to compute a warp tile's capacity.
+
+    Returns
+    -------
+    dict of str to Value
+        Named backend overrides for ``num_valid_items`` and/or ``oob_default``.
+
+    Raises
+    ------
+    ValueError
+        A runtime count does not have exactly one block/warp topology source, or
+        its bounds cannot fit the integer ABI.
+    """
 
     value_abis = {}
     if valid_items.kind is BindingKind.RUNTIME:
@@ -122,7 +155,58 @@ def _load(
     offset=None,
     threads_in_warp=None,
 ):
-    """Build the Load invocable selected by group planning."""
+    """Build a Load provider for the planned specialization and bindings.
+
+    Use the registered factory identity to select block/warp semantics and
+    verify whether the chosen algorithm requires scratch. Lower the common Load
+    specification through the Numba adapter, including checked runtime counts,
+    exact-dtype runtime defaults, and embedded static controls. The factory
+    describes a callable compiled operation; it does not load data here.
+
+    Explicit ``ArgumentBinding`` objects distinguish omitted, static, and
+    runtime controls. Legacy non-``None`` values indicate runtime presence, not
+    a literal to embed. For a legacy count, retain the full-tile overload as
+    well. Legacy offset arguments request offset overloads even when ``None``;
+    explicit bindings let the planner select their precise form.
+
+    Parameters
+    ----------
+    provider_factory : callable
+        Exactly registered Load factory whose namespace, storage ABI, and
+        synchronization metadata govern materialization.
+    dtype : object
+        Payload dtype accepted by the common numeric profile.
+    threads_per_block : int or tuple of int
+        Required enclosing block dimensions, including for warp providers.
+    items_per_thread : int, optional
+        Positive per-thread payload extent; defaults to one.
+    algorithm : str, optional
+        Specialized Load algorithm, resolved within the factory's namespace.
+    num_valid_items : ArgumentBinding or object, optional
+        Valid-count binding or legacy runtime-presence marker.
+    oob_default : ArgumentBinding or object, optional
+        Load default binding or runtime-presence marker. Requires a valid-count
+        binding; static defaults are checked against the payload dtype.
+    offset : ArgumentBinding or object, optional
+        Pointer-offset binding or legacy overload-presence input.
+    threads_in_warp : int, optional
+        Required logical width for warp providers; invalid for block providers.
+
+    Returns
+    -------
+    Invocable or Algorithm
+        Compiled provider callable, or the specialization recorded when
+        ``collect_specializations`` is active.
+
+    Raises
+    ------
+    TypeError
+        A dtype, integer extent, or static scalar is unsupported.
+    ValueError
+        Topology, algorithm/storage pairing, or optional bindings are invalid.
+    RuntimeError
+        The factory is unregistered or artifact construction fails.
+    """
 
     valid_items_binding = _optional_binding(num_valid_items)
     oob_default_binding = _optional_binding(oob_default)
@@ -328,7 +412,56 @@ def _store(
     offset=None,
     threads_in_warp=None,
 ):
-    """Build the Store invocable selected by group planning."""
+    """Build a Store provider for the planned specialization and bindings.
+
+    Resolve the registered block/warp factory and its storage contract, then
+    materialize the common Store specification with Numba-specific runtime count
+    bounds. A warp provider also retains the enclosing block dimensions for
+    scratch layout. This constructs a compiled callable; it does not write
+    device memory during host-side factory evaluation.
+
+    As in ``_load``, explicit bindings control whether scalar arguments are
+    omitted, embedded, or runtime. A legacy non-``None`` count means runtime
+    presence and retains a full-tile overload. Legacy offset inputs request
+    offset overloads regardless of their value; an explicit binding selects the
+    offset form. Store never accepts a Load padding default.
+
+    Parameters
+    ----------
+    provider_factory : callable
+        Exactly registered Store factory supplying namespace and ABI metadata.
+    dtype : object
+        Payload dtype accepted by the common numeric profile.
+    threads_per_block : int or tuple of int
+        Required enclosing block dimensions, also for warp providers.
+    items_per_thread : int, optional
+        Positive per-thread payload extent; defaults to one.
+    algorithm : str, optional
+        Specialized Store algorithm within the factory's namespace.
+    num_valid_items : ArgumentBinding or object, optional
+        Valid-count binding or legacy runtime-presence marker.
+    oob_default : None, optional
+        Shared factory-interface slot; any non-``None`` value is rejected.
+    offset : ArgumentBinding or object, optional
+        Pointer-offset binding or legacy overload-presence input.
+    threads_in_warp : int, optional
+        Required logical width for warp providers; invalid for block providers.
+
+    Returns
+    -------
+    Invocable or Algorithm
+        Compiled provider callable, or the specialization recorded by an active
+        ``collect_specializations`` context.
+
+    Raises
+    ------
+    TypeError
+        A dtype or integer extent is unsupported.
+    ValueError
+        Topology, algorithm/storage pairing, or optional bindings are invalid.
+    RuntimeError
+        The factory is unregistered or artifact construction fails.
+    """
 
     if oob_default is not None:
         raise ValueError("oob_default is only valid for Load")

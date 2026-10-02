@@ -51,7 +51,42 @@ def try_resolve_static_scalar_provenance(
     argument_type: Callable[[int], Any | None],
     seen: set[str] | None = None,
 ) -> tuple[bool, StaticScalarProvenance | None]:
-    """Resolve a scalar and retain whether Numba already assigned its dtype."""
+    """Resolve an explicitly static value while retaining its compiler dtype.
+
+    Planning must distinguish a literal supplied by the user from a runtime
+    expression that general constant inference happens to evaluate. Accept
+    constants, globals, free variables, literal arguments, and arguments known
+    to be ``None``; follow only aliases, casts, and phi inputs. Every reaching
+    leaf must agree in Python value type, value, and recorded dtype. Runtime
+    expressions, unresolved paths, and cycles make the result unresolved. This
+    traversal neither evaluates scalar operators nor requests dispatcher
+    specialization.
+
+    Parameters
+    ----------
+    value : ir.Var or object
+        Value to inspect. Non-variable inputs are accepted directly as static;
+        callers are responsible for restricting them to the intended scalar
+        domain.
+    definitions : callable
+        Return all reaching definitions for an IR variable.
+    argument_type : callable
+        Return the compiler type for a function argument index, or ``None`` when
+        unavailable. Literal types retain their ``literal_type``.
+    seen : set of str, optional
+        Names already visited on this recursion path. The current variable is
+        added in place; recursive branches receive separate copies.
+
+    Returns
+    -------
+    resolved : bool
+        Whether all inspected definitions establish the same static value.
+    scalar : StaticScalarProvenance or None
+        Resolved value and its known dtype, or ``None`` on failure. A resolved
+        ``None`` value is represented by a provenance object and is distinct
+        from failure. NumPy scalars contribute their own dtype; ordinary Python
+        constants leave the dtype unspecified for contextual coercion.
+    """
 
     if not isinstance(value, ir.Var):
         return (True, _static_scalar(value))
@@ -144,12 +179,35 @@ def try_resolve_static_scalar(
     argument_type: Callable[[int], Any | None],
     seen: set[str] | None = None,
 ) -> tuple[bool, Any]:
-    """Resolve a scalar only when every reaching definition is static.
+    """Resolve a static value and preserve a known scalar width when possible.
 
-    Globals, free variables, literals, and IR constants are static. Aliases,
-    casts, and phi nodes preserve that classification only when all incoming
-    definitions resolve to the same typed value. Runtime expressions are never
-    evaluated through Numba's general constant-inference machinery here.
+    Use ``try_resolve_static_scalar_provenance`` to require agreement across all
+    reaching definitions without evaluating runtime expressions. Unwrap its
+    result, converting a value with a known compiler dtype to the matching NumPy
+    scalar when possible. If that conversion is unsupported or fails, return the
+    original value. Use the provenance-returning helper when the recorded dtype
+    itself is needed for validation.
+
+    Parameters
+    ----------
+    value : ir.Var or object
+        IR value or already-static Python value to resolve.
+    definitions : callable
+        Return all reaching definitions for an IR variable.
+    argument_type : callable
+        Return the compiler type for a function argument index, or ``None`` when
+        unavailable.
+    seen : set of str, optional
+        Names on the current recursion path. Passed to the provenance resolver,
+        which adds the current variable in place and copies it for branches.
+
+    Returns
+    -------
+    resolved : bool
+        Whether the value has consistent, explicitly static provenance.
+    value : object
+        Unwrapped static value, or ``None`` on failure. Consult ``resolved`` to
+        distinguish an unresolved value from a statically known ``None``.
     """
 
     resolved, scalar = try_resolve_static_scalar_provenance(

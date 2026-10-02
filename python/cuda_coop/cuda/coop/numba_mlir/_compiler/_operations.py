@@ -22,7 +22,7 @@ from cuda.coop._core import SynchronizationScope
 _CallableT = TypeVar("_CallableT", bound=Callable[..., Any])
 
 # The whole-function group planner attaches its exact lowering record to the
-# provider marker with this reserved keyword.  The before-inference rewrite
+# provider marker with this reserved keyword.  The provider rewrite
 # consumes it before invoking the registered provider factory.
 _GROUP_LOWERING_PLAN_KWARG = "__cuda_coop_group_lowering_plan__"
 
@@ -341,7 +341,35 @@ def group_operation(
     *,
     family_module: str,
 ) -> Callable[[_CallableT], _CallableT]:
-    """Register one public group marker by exact callable identity."""
+    """Associate a public group marker with its compiler family.
+
+    The decorator records the exact callable object, so the planner recognizes
+    aliases of the registered function without treating unrelated functions with
+    the same name as cooperative operations. Record the family module for lazy
+    loading of planning/rewrite hooks and attach the backend-member marker used
+    during common API provenance checks. Registration does not import that
+    family or wrap the decorated function.
+
+    Parameters
+    ----------
+    operation : str
+        Shared operation identifier used by group planning and rewrite lookup.
+    family_module : str
+        Importable compiler-family module that registers the operation's hooks.
+
+    Returns
+    -------
+    callable
+        Decorator that mutates the registries and callable metadata, then
+        returns the original function. Repeating the same registration is
+        allowed.
+
+    Raises
+    ------
+    RuntimeError
+        Applying the decorator would associate an already registered callable
+        with another operation, or an operation with another family module.
+    """
 
     def decorate(function: _CallableT) -> _CallableT:
         existing = _GROUP_OPERATIONS.get(function)
@@ -414,7 +442,25 @@ def register_rewrite_operation(
     operation: str,
     spec: RewriteOperationSpec,
 ) -> None:
-    """Register one provider ABI with the shared before-inference rewrite."""
+    """Register one provider ABI with the shared before-inference rewrite.
+
+    Re-registering an equal specification is allowed; a different specification
+    for the same operation would make call interpretation ambiguous.
+
+    Parameters
+    ----------
+    operation : str
+        Operation name used to look up the call grammar and rewrite hooks.
+    spec : RewriteOperationSpec
+        Provider call grammar and hooks for this operation.
+
+    Raises
+    ------
+    TypeError
+        ``spec`` is not a ``RewriteOperationSpec``.
+    RuntimeError
+        The operation is already registered with a different specification.
+    """
 
     if not isinstance(spec, RewriteOperationSpec):
         raise TypeError("spec must be a RewriteOperationSpec")
@@ -427,7 +473,22 @@ def register_rewrite_operation(
 
 
 def rewrite_operation(operation: str) -> RewriteOperationSpec | None:
-    """Return the before-inference registration for one operation."""
+    """Return the before-inference registration for one operation.
+
+    Load the owning primitive family when its registration is missing,
+    without eagerly importing every family.
+
+    Parameters
+    ----------
+    operation : str
+        Operation name whose call grammar and rewrite hooks are requested.
+
+    Returns
+    -------
+    RewriteOperationSpec or None
+        Registered specification, or ``None`` if no registration exists after
+        loading the owning family.
+    """
 
     if operation not in _REWRITE_OPERATIONS:
         _ensure_group_family_loaded(operation)
@@ -443,7 +504,44 @@ def register_factory(
     execution_scope: SynchronizationScope,
     synchronization_scope: SynchronizationScope,
 ) -> _CallableT:
-    """Register a primitive provider without relying on its import path."""
+    """Record the compile-time contract of an exact lowering factory callable.
+
+    The provider rewrite identifies factories by object identity and
+    uses this metadata to validate provider calls and materialized invocables.
+    The factory's import path or function name is not used to infer its ABI.
+    Registration only declares metadata; the factory and source emitter must
+    implement the declared storage and synchronization behavior.
+
+    Parameters
+    ----------
+    function : callable
+        Host-side factory that creates a provider specialization or invocable.
+    operation : str
+        Non-empty operation identifier, such as ``"load"`` or ``"store"``.
+    namespace : str
+        Non-empty provider namespace, such as ``"block"`` or ``"warp"``.
+    storage_abi : StorageABI
+        Whether provider calls have a leading scratch pointer or no scratch.
+    execution_scope : SynchronizationScope
+        Scope of threads executing the cooperative operation.
+    synchronization_scope : SynchronizationScope
+        Declared synchronization scope, either ``NONE`` or the execution scope.
+
+    Returns
+    -------
+    callable
+        The original factory after registry insertion. Identical repeated
+        registration is accepted.
+
+    Raises
+    ------
+    TypeError
+        ``function`` is not callable.
+    ValueError
+        Names, enum values, or the relationship between scopes are invalid.
+    RuntimeError
+        This exact factory is already registered with different metadata.
+    """
 
     if not callable(function):
         raise TypeError("lowering factory must be callable")
